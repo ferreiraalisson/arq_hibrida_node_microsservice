@@ -1,0 +1,12 @@
+# Evitar copiar node_modules do host
+**/node_modules
+
+# Evitar variáveis locais para dentro das imagens
+**/.env
+
+# DB local de dev (SQLite) — não vai pro container
+**/dev.db
+
+# Outras tranqueiras
+.DS_Store
+npm-debug.log

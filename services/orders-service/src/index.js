@@ -4,8 +4,11 @@ import fetch from 'node-fetch';
 import { nanoid } from 'nanoid';
 import { createChannel } from './amqp.js';
 import { ROUTING_KEYS } from '../common/events.js';
+import { PrismaClient } from '@prisma/client';
 
 const app = express();
+const prisma = new PrismaClient();
+
 app.use(express.json());
 app.use(morgan('dev'));
 
@@ -18,7 +21,7 @@ const QUEUE = process.env.QUEUE || 'orders.q';
 const ROUTING_KEY_USER_CREATED = process.env.ROUTING_KEY_USER_CREATED || ROUTING_KEYS.USER_CREATED;
 
 // In-memory "DB"
-const orders = new Map();
+// const orders = new Map();
 // In-memory cache de usuários (preenchido por eventos)
 const userCache = new Map();
 
@@ -52,8 +55,10 @@ let amqp = null;
 
 app.get('/health', (req, res) => res.json({ ok: true, service: 'orders' }));
 
-app.get('/', (req, res) => {
-  res.json(Array.from(orders.values()));
+app.get('/', async (req, res) => {
+  // res.json(Array.from(orders.values()));
+  const list = await prisma.order.findMany();
+  res.json(list);
 });
 
 async function fetchWithTimeout(url, ms) {
@@ -86,42 +91,66 @@ app.post('/', async (req, res) => {
   }
 
   const id = `o_${nanoid(6)}`;
-  const order = { id, userId, items, total, status: 'created', createdAt: new Date().toISOString() };
-  orders.set(id, order);
 
-  // (Opcional) publicar evento order.created
+  // const order = { id, userId, items, total, status: 'created', createdAt: new Date().toISOString() };
+  // orders.set(id, order);
+  
   try {
-    if (amqp?.ch) {
-      amqp.ch.publish(EXCHANGE, ROUTING_KEYS.ORDER_CREATED, Buffer.from(JSON.stringify(order)), { persistent: true });
-      console.log('[orders] published event:', ROUTING_KEYS.ORDER_CREATED, order.id);
+    const order = await prisma.order.create({
+      data: {
+        id: id,
+        userId: userId,
+        products: items,
+        total: total,
+      }
+    });
+    // (Opcional) publicar evento order.created
+    try {
+      if (amqp?.ch) {
+        amqp.ch.publish(EXCHANGE, ROUTING_KEYS.ORDER_CREATED, Buffer.from(JSON.stringify(order)), { persistent: true });
+        console.log('[orders] published event:', ROUTING_KEYS.ORDER_CREATED, order.id);
+      }
+    } catch (err) {
+      console.error('[orders] publish error:', err.message);
     }
-  } catch (err) {
-    console.error('[orders] publish error:', err.message);
+    res.status(201).json(order);
+  } catch (error) {
+    console.error('[prisma] create error:', error);
+    res.status(500).json({ error: 'Could not create order' });
   }
-
-  res.status(201).json(order);
 });
 
-app.delete('/:id', (req, res) => {
+app.delete('/:id', async (req, res) => {
   const id = req.params.id;
 
-  const order = orders.get(id);
-  if (!order) {
-    return res.status(404).json({ error: 'not found' });
-  }
+  // const order = orders.get(id);
+  // if (!order) {
+  //   return res.status(404).json({ error: 'not found' });
+  // }
 
-  orders.delete(id);
+  // orders.delete(id);
 
   try {
-    if (amqp?.ch) {
-      amqp.ch.publish(EXCHANGE, ROUTING_KEYS.ORDER_CANCELLED, Buffer.from(JSON.stringify(order)), { persistent: true });
-      console.log('[orders] published event:', ROUTING_KEYS.ORDER_CANCELLED, order.id);
-    }
-  } catch (err) {
-    console.error('[orders] publish error:', err.message);
-  }
+      const order = await prisma.order.update({
+      where: { id },
+      data: { status: 'cancelled' }
+    });
 
-  res.status(200).json({ message: 'order cancelled', id });
+    try {
+      if (amqp?.ch) {
+        amqp.ch.publish(EXCHANGE, ROUTING_KEYS.ORDER_CANCELLED, Buffer.from(JSON.stringify(order)), { persistent: true });
+        console.log('[orders] published event:', ROUTING_KEYS.ORDER_CANCELLED, order.id);
+      }
+    } catch (err) {
+      console.error('[orders] publish error:', err.message);
+    }
+
+    res.status(200).json({ message: 'order cancelled', id });
+  } catch (error) {
+      if (err.code === 'P2025') return res.status(404).json({ error: 'not found' });
+      console.error('[orders] cancel error:', err);
+      res.status(500).json({ error: 'Could not delete order' });
+  }  
 });
 
 app.listen(PORT, '0.0.0.0', () => {

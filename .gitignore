@@ -1,0 +1,9 @@
+# Node modules
+**/node_modules/
+
+# Logs
+npm-debug.log
+yarn-error.log
+
+# Sistema
+.DS_Store
