@@ -152,24 +152,18 @@ app.post('/', async (req, res) => {
     return res.status(400).json({ error: 'userId, items[], total<number> são obrigatórios' });
   }
 
-  // 1) Validação síncrona (HTTP) no Users Service
-  try {
-    const resp = await fetchWithTimeout(`${USERS_BASE_URL}/${userId}`, HTTP_TIMEOUT_MS);
-    if (!resp.ok) return res.status(400).json({ error: 'usuário inválido' });
-  } catch (err) {
-    console.warn('[orders] users-service timeout/failure, tentando cache...', err.message);
-    // fallback: usar cache populado por eventos (assíncrono)
-    if (!userCache.has(userId)) {
-      return res.status(503).json({ error: 'users-service indisponível e usuário não encontrado no cache' });
-    }
-  }
+  const user = await breaker.fire(userId);
 
+  if (user.error) {
+    return res.status(user.status || 400).json({ error: user.error });
+  }
   const id = `o_${nanoid(6)}`;
 
   // const order = { id, userId, items, total, status: 'created', createdAt: new Date().toISOString() };
   // orders.set(id, order);
   
   try {
+
     const order = await prisma.order.create({
       data: {
         id: id,
@@ -189,6 +183,9 @@ app.post('/', async (req, res) => {
     }
     res.status(201).json(order);
   } catch (error) {
+    if (err.code === 'SERVICE_UNAVAILABLE') {
+      return res.status(503).json({ error: err.message });
+    }
     console.error('[prisma] create error:', error);
     res.status(500).json({ error: 'Could not create order' });
   }
