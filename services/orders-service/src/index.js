@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import { createChannel } from './amqp.js';
 import { ROUTING_KEYS } from '../common/events.js';
 import { PrismaClient } from '@prisma/client';
+import opossum from 'opossum';
 
 const app = express();
 const prisma = new PrismaClient();
@@ -13,13 +14,14 @@ app.use(express.json());
 app.use(morgan('dev'));
 
 const PORT = process.env.PORT || 3002;
-const USERS_BASE_URL = process.env.USERS_BASE_URL || 'http://localhost:3001';
+const USERS_BASE_URL = process.env.USERS_BASE_URL || 'http://ms_users:3001';
 const HTTP_TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS || 2000);
-const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672';
+const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://guest:guest@ms_rabbitmq:5672';
 const EXCHANGE = process.env.EXCHANGE || 'app.topic';
 const QUEUE = process.env.QUEUE || 'orders.q';
 const ROUTING_KEY_USER_CREATED = process.env.ROUTING_KEY_USER_CREATED || ROUTING_KEYS.USER_CREATED;
-
+const BASE_HTTP_RETRY_DELAY = 500;
+const MAX_HTTP_RETRIES = 3;
 // In-memory "DB"
 // const orders = new Map();
 // In-memory cache de usuários (preenchido por eventos)
@@ -61,16 +63,88 @@ app.get('/', async (req, res) => {
   res.json(list);
 });
 
-async function fetchWithTimeout(url, ms) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), ms);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    return res;
-  } finally {
-    clearTimeout(id);
+async function fetchWithBackoff(url, ms) {
+  for ( let retries = 0; retries < MAX_HTTP_RETRIES; retries++){
+    try {
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), ms);
+
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if(res.status >= 500){
+        throw new Error(`Users service (servidor) falhou com status ${res.status}`);
+      }
+
+      return res;
+
+    } catch (error) {
+      console.warn(`[HTTP Fetch] Falha ao chamar ${url}. Tentativa ${retries + 1}.`)
+    
+      if (retries === MAX_HTTP_RETRIES - 1) {
+        console.error('[HTTP Fetch] Todas as tentativas falharam.');
+        throw err; // Lança o erro na última tentativa
+      }
+
+      const delay = BASE_HTTP_RETRY_DELAY * Math.pow(2, retries);
+      const jitter = Math.floor(Math.random() * 200); // 0 a 0.2s
+      
+      console.warn(`[HTTP Fetch] Tentando de novo em ${delay + jitter}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay + jitter));
+    
+    }
   }
+  // const controller = new AbortController();
+  // const id = setTimeout(() => controller.abort(), ms);
+  // try {
+  //   const res = await fetch(url, { signal: controller.signal });
+  //   return res;
+  // } finally {
+  //   clearTimeout(id);
+  // }
 }
+
+// Esta função agora usa nosso fetch com retry
+async function callUserService(userId) {
+  const url = `${USERS_BASE_URL}/${userId}`;
+  
+  // 1. Chama a função com retry/backoff
+  const resp = await fetchWithBackoff(url, HTTP_TIMEOUT_MS);
+
+  // 2. Trata a resposta (o 'fetchWithBackoff' já filtrou os 5xx)
+  if (!resp.ok) { // 404 (não achou), 400 (inválido)
+    return { error: 'usuário inválido', status: resp.status };
+  }
+  
+  return await resp.json(); // Sucesso!
+}
+
+// CONFIGURAÇÃO DO CIRCUIT BREAKER (OPOSSUM)
+const breakerOptions = {
+  timeout: HTTP_TIMEOUT_MS * (MAX_HTTP_RETRIES + 1), // O timeout do disjuntor deve ser MAIOR que todas as retentativas
+  errorThresholdPercentage: 50, // Se 50% das chamadas falharem, o disjuntor "abre"
+  resetTimeout: 10000 // Depois de 10s "aberto", ele tenta fechar
+};
+
+// Embrulha a função 'callUserService' com o disjuntor
+const breaker = new opossum(callUserService, breakerOptions);
+
+// Define o FALLBACK (Plano B)
+breaker.fallback(async (userId) => {
+  console.warn('[orders] CIRCUIT BREAKER FALLBACK! Tentando cache...', userId);
+  if (userCache.has(userId)) {
+    return userCache.get(userId); // Retorna do cache se o disjuntor estiver aberto
+  }
+  const err = new Error('Serviço indisponível e usuário não encontrado no cache');
+  err.code = 'SERVICE_UNAVAILABLE';
+  throw err;
+});
+
+// Logs para sabermos o que o disjuntor está fazendo
+breaker.on('open', () => console.error('[orders] Disjuntor ABERTO para Users-Service.'));
+breaker.on('close', () => console.log('[orders] Disjuntor FECHADO para Users-Service.'));
+breaker.on('fallback', (result) => console.warn('[orders] Fallback acionado.', result));
 
 app.post('/', async (req, res) => {
   const { userId, items, total } = req.body || {};
@@ -100,7 +174,7 @@ app.post('/', async (req, res) => {
       data: {
         id: id,
         userId: userId,
-        products: items,
+        items: items,
         total: total,
       }
     });

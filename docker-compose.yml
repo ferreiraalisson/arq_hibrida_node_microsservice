@@ -54,6 +54,7 @@ services:
         condition: service_healthy
     ports:
       - "3001:3001"
+    command: sh -c "npx prisma migrate dev && npm run start"
     networks: 
       - microservices-net
     volumes:
@@ -72,13 +73,13 @@ services:
     restart: always
     environment:
       PORT: 3002
-      USERS_BASE_URL: http://users:3001
+      USERS_BASE_URL: http://ms_users:3001
       HTTP_TIMEOUT_MS: 2000
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      RABBITMQ_URL: amqp://guest:guest@ms_rabbitmq:5672
       EXCHANGE: app.topic
       QUEUE: orders.q
       ROUTING_KEY_USER_CREATED: user.created
-      DATABASE_URL: postgresql://admin:admin@postgres:5432/orders_db?schema=public
+      DATABASE_URL: postgresql://admin:admin@ms_postgres:5432/orders_db?schema=public
     depends_on:
       rabbitmq:
         condition: service_started
@@ -88,6 +89,7 @@ services:
         condition: service_healthy
     ports:
       - "3002:3002"
+    command: sh -c "npx prisma migrate dev && npm run start"
     networks: 
       - microservices-net
     volumes:

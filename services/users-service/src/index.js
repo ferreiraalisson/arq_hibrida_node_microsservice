@@ -57,17 +57,15 @@ app.post('/', async (req, res) => {
         amqp.ch.publish(EXCHANGE, ROUTING_KEYS.USER_CREATED, payload, { persistent: true });
         console.log('[users] published event:', ROUTING_KEYS.USER_CREATED, user);
       }
-
-      res.status(201).json(user);
-
     } catch (err) {
       console.error('[users] publish error:', err.message);
     }
+    res.status(201).json(user);
   } catch (error) {
      if (err.code === 'P2002') {
       return res.status(409).json({ error: 'Email already exists' });
     }
-    console.error('[users] publish error:', err.message);
+    console.error('[users] create error:', err.message);
     res.status(500).json({ error: 'Erro ao tentar criar usuário' });
   }
      

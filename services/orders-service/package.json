@@ -14,7 +14,8 @@
     "express": "^4.19.2",
     "morgan": "^1.10.0",
     "nanoid": "^5.0.7",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "opossum": "^9.0.0"
   },
   "devDependencies": {
     "prisma": "^6.17.1"

@@ -7,7 +7,7 @@ const app = express();
 app.use(morgan('dev'));
 
 const PORT = process.env.PORT || 3000;
-const USERS_URL = process.env.USERS_URL || 'http://localhost:3001';
+const USERS_URL = process.env.USERS_URL || 'http://ms_users:3001';
 const ORDERS_URL = process.env.ORDERS_URL || 'http://localhost:3002';
 
 // Health
